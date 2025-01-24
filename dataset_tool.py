@@ -7,6 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import functools
+import torch
 import io
 import json
 import os
@@ -17,7 +18,7 @@ import gzip
 import zipfile
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
-
+import cv2
 import click
 import numpy as np
 import PIL.Image
@@ -143,13 +144,35 @@ def open_cifar10(tarball: str, *, max_images: Optional[int]):
             member = tar.getmember(f'cifar-10-batches-py/data_batch_{batch}')
             with tar.extractfile(member) as file:
                 data = pickle.load(file, encoding='latin1')
-            images.append(data['data'].reshape(-1, 3, 32, 32))
+                
+            _images = data['data'].reshape(-1, 3, 32, 32)
+            downscaled_images = []
+            
+            for img in _images:
+                depth_slices = []
+                for d in range(32):
+                    scale_factor = 1.0 - abs(d - 16) / 16.0
+                    scale_size = max(1, int(32 * scale_factor))
+                    scaled_img = np.array([
+                        cv2.resize(channel, (scale_size, scale_size), interpolation=cv2.INTER_LINEAR)
+                        for channel in img
+                    ])
+                    padded_img = np.zeros((3, 32, 32), dtype=img.dtype)
+                    offset = (32 - scale_size) // 2
+                    for i in range(3):
+                        padded_img[i, offset:offset+scale_size, offset:offset+scale_size] = scaled_img[i]
+                    depth_slices.append(padded_img)
+
+                downscaled_img = np.stack(depth_slices, axis=1)
+                downscaled_images.append(downscaled_img)
+            
+            images.append(np.array(downscaled_images))
             labels.append(data['labels'])
 
     images = np.concatenate(images)
     labels = np.concatenate(labels)
-    images = images.transpose([0, 2, 3, 1]) # NCHW -> NHWC
-    assert images.shape == (50000, 32, 32, 3) and images.dtype == np.uint8
+    images = images.transpose([0, 2, 3, 4, 1])  # NCHWD -> NDHWC
+    assert images.shape == (50000, 32, 32, 32, 3) and images.dtype == np.uint8
     assert labels.shape == (50000,) and labels.dtype in [np.int32, np.int64]
     assert np.min(images) == 0 and np.max(images) == 255
     assert np.min(labels) == 0 and np.max(labels) == 9
@@ -164,32 +187,37 @@ def open_cifar10(tarball: str, *, max_images: Optional[int]):
 
     return max_idx, iterate_images()
 
+
 #----------------------------------------------------------------------------
 
-def open_mnist(images_gz: str, *, max_images: Optional[int]):
-    labels_gz = images_gz.replace('-images-idx3-ubyte.gz', '-labels-idx1-ubyte.gz')
-    assert labels_gz != images_gz
-    images = []
-    labels = []
+def prepare_medmnist(dataset_path: str, max_images: Optional[int] = None):
+    from skimage.transform import resize
+    dataset = np.load(dataset_path)
+    images = dataset['train_images']
+    labels = dataset['train_labels']
 
-    with gzip.open(images_gz, 'rb') as f:
-        images = np.frombuffer(f.read(), np.uint8, offset=16)
-    with gzip.open(labels_gz, 'rb') as f:
-        labels = np.frombuffer(f.read(), np.uint8, offset=8)
+    assert images.dtype == np.uint8, "Images should have dtype uint8."
+    assert labels.dtype == np.uint8, "Labels should have dtype uint8."
+    assert np.min(images) == 0 and np.max(images) == 255, "Images should have pixel values in range 0-255."
+    assert np.min(labels) >= 0 and np.max(labels) <= 2, "Labels should be in range 0-2."
 
-    images = images.reshape(-1, 28, 28)
-    images = np.pad(images, [(0,0), (2,2), (2,2)], 'constant', constant_values=0)
-    assert images.shape == (60000, 32, 32) and images.dtype == np.uint8
-    assert labels.shape == (60000,) and labels.dtype == np.uint8
-    assert np.min(images) == 0 and np.max(images) == 255
-    assert np.min(labels) == 0 and np.max(labels) == 9
+    resized = resize(
+        images,
+        (images.shape[0], 32, 32, 32),
+        order=1,
+        preserve_range=True,
+        anti_aliasing=True,
+    )
+    resized_images = resized.astype(np.uint8)
 
-    max_idx = maybe_min(len(images), max_images)
+    max_idx = min(len(resized_images), max_images) if max_images is not None else len(resized_images)
+    resized_images = resized_images[:max_idx]
+    labels = labels[:max_idx]
 
     def iterate_images():
-        for idx, img in enumerate(images):
+        for idx, img in enumerate(resized_images):
             yield dict(img=img, label=int(labels[idx]))
-            if idx >= max_idx-1:
+            if idx >= max_idx - 1:
                 break
 
     return max_idx, iterate_images()
@@ -200,51 +228,8 @@ def make_transform(
     transform: Optional[str],
     output_width: Optional[int],
     output_height: Optional[int],
-    resize_filter: str
+    output_depth: Optional[int]
 ) -> Callable[[np.ndarray], Optional[np.ndarray]]:
-    resample = { 'box': PIL.Image.BOX, 'lanczos': PIL.Image.LANCZOS }[resize_filter]
-    def scale(width, height, img):
-        w = img.shape[1]
-        h = img.shape[0]
-        if width == w and height == h:
-            return img
-        img = PIL.Image.fromarray(img)
-        ww = width if width is not None else w
-        hh = height if height is not None else h
-        img = img.resize((ww, hh), resample)
-        return np.array(img)
-
-    def center_crop(width, height, img):
-        crop = np.min(img.shape[:2])
-        img = img[(img.shape[0] - crop) // 2 : (img.shape[0] + crop) // 2, (img.shape[1] - crop) // 2 : (img.shape[1] + crop) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
-        img = img.resize((width, height), resample)
-        return np.array(img)
-
-    def center_crop_wide(width, height, img):
-        ch = int(np.round(width * img.shape[0] / img.shape[1]))
-        if img.shape[1] < width or ch < height:
-            return None
-
-        img = img[(img.shape[0] - ch) // 2 : (img.shape[0] + ch) // 2]
-        img = PIL.Image.fromarray(img, 'RGB')
-        img = img.resize((width, height), resample)
-        img = np.array(img)
-
-        canvas = np.zeros([width, width, 3], dtype=np.uint8)
-        canvas[(width - height) // 2 : (width + height) // 2, :] = img
-        return canvas
-
-    if transform is None:
-        return functools.partial(scale, output_width, output_height)
-    if transform == 'center-crop':
-        if (output_width is None) or (output_height is None):
-            error ('must specify --width and --height when using ' + transform + 'transform')
-        return functools.partial(center_crop, output_width, output_height)
-    if transform == 'center-crop-wide':
-        if (output_width is None) or (output_height is None):
-            error ('must specify --width and --height when using ' + transform + ' transform')
-        return functools.partial(center_crop_wide, output_width, output_height)
     assert False, 'unknown transform'
 
 #----------------------------------------------------------------------------
@@ -260,6 +245,8 @@ def open_dataset(source, *, max_images: Optional[int]):
             return open_cifar10(source, max_images=max_images)
         elif os.path.basename(source) == 'train-images-idx3-ubyte.gz':
             return open_mnist(source, max_images=max_images)
+        elif os.path.basename(source).endswith('.npz'):
+            return prepare_medmnist(source, max_images=max_images)
         elif file_ext(source) == 'zip':
             return open_image_zip(source, max_images=max_images)
         else:
@@ -310,6 +297,7 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
 @click.option('--transform', help='Input crop/resize mode', type=click.Choice(['center-crop', 'center-crop-wide']))
 @click.option('--width', help='Output width', type=int)
 @click.option('--height', help='Output height', type=int)
+@click.option('--depth', help='Output depth.', type=int)
 def convert_dataset(
     ctx: click.Context,
     source: str,
@@ -318,7 +306,8 @@ def convert_dataset(
     transform: Optional[str],
     resize_filter: str,
     width: Optional[int],
-    height: Optional[int]
+    height: Optional[int],
+    depth: Optional[int]
 ):
     """Convert an image dataset into a dataset archive usable with StyleGAN2 ADA PyTorch.
 
@@ -378,45 +367,38 @@ def convert_dataset(
     python dataset_tool.py --source LSUN/raw/cat_lmdb --dest /tmp/lsun_cat \\
         --transform=center-crop-wide --width 512 --height=384
     """
-
-    PIL.Image.init() # type: ignore
-
     if dest == '':
         ctx.fail('--dest output filename or directory must not be an empty string')
 
     num_files, input_iter = open_dataset(source, max_images=max_images)
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
-
-    transform_image = make_transform(transform, width, height, resize_filter)
+    
+    # transform_image = make_transform(transform, width, height, depth, resize_filter)
 
     dataset_attrs = None
 
     labels = []
     for idx, image in tqdm(enumerate(input_iter), total=num_files):
         idx_str = f'{idx:08d}'
-        archive_fname = f'{idx_str[:5]}/img{idx_str}.png'
-
-        # Apply crop and resize.
-        img = transform_image(image['img'])
+        archive_fname = f'{idx_str[:5]}/img{idx_str}.pt'
 
         # Transform may drop images.
-        if img is None:
-            continue
-
-        # Error check to require uniform image attributes across
-        # the whole dataset.
-        channels = img.shape[2] if img.ndim == 3 else 1
+        img = image['img']
+        
+        channels = img.shape[3] if img.ndim == 4 else 1
         cur_image_attrs = {
+            'depth': img.shape[2],
             'width': img.shape[1],
             'height': img.shape[0],
             'channels': channels
         }
         if dataset_attrs is None:
             dataset_attrs = cur_image_attrs
+            depth = dataset_attrs['depth']
             width = dataset_attrs['width']
             height = dataset_attrs['height']
             if width != height:
-                error(f'Image dimensions after scale and crop are required to be square.  Got {width}x{height}')
+                error(f'Image dimensions after scale and crop are required to be square.  Got {width}x{height}x{depth}')
             if dataset_attrs['channels'] not in [1, 3]:
                 error('Input images must be stored as RGB or grayscale')
             if width != 2 ** int(np.floor(np.log2(width))):
@@ -426,10 +408,10 @@ def convert_dataset(
             error(f'Image {archive_fname} attributes must be equal across all images of the dataset.  Got:\n' + '\n'.join(err))
 
         # Save the image as an uncompressed PNG.
-        img = PIL.Image.fromarray(img, { 1: 'L', 3: 'RGB' }[channels])
+        image_tensor = torch.from_numpy(img)
         image_bits = io.BytesIO()
-        img.save(image_bits, format='png', compress_level=0, optimize=False)
-        save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer())
+        torch.save(image_tensor, image_bits)
+        save_bytes(os.path.join(archive_root_dir, archive_fname), image_bits.getvalue())
         labels.append([archive_fname, image['label']] if image['label'] is not None else None)
 
     metadata = {

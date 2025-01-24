@@ -18,7 +18,7 @@ import torch
 import dnnlib
 from torch_utils import misc
 from torch_utils import training_stats
-from torch_utils.ops import conv2d_gradfix
+from torch_utils.ops import conv3d_gradfix
 from torch_utils.ops import grid_sample_gradfix
 
 import legacy
@@ -28,8 +28,8 @@ from metrics import metric_main
 
 def setup_snapshot_image_grid(training_set, random_seed=0):
     rnd = np.random.RandomState(random_seed)
-    gw = np.clip(7680 // training_set.image_shape[2], 7, 32)
-    gh = np.clip(4320 // training_set.image_shape[1], 4, 32)
+    gw = 10
+    gh = 10
 
     # No labels => show random subset of training samples.
     if not training_set.has_labels:
@@ -65,23 +65,60 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
 
 #----------------------------------------------------------------------------
 
-def save_image_grid(img, fname, drange, grid_size):
-    lo, hi = drange
-    img = np.asarray(img, dtype=np.float32)
-    img = (img - lo) * (255 / (hi - lo))
-    img = np.rint(img).clip(0, 255).astype(np.uint8)
+def save_image_grid(_img, _fname, _drange, _grid_size):
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
 
-    gw, gh = grid_size
-    _N, C, H, W = img.shape
-    img = img.reshape(gh, gw, C, H, W)
-    img = img.transpose(0, 3, 1, 4, 2)
-    img = img.reshape(gh * H, gw * W, C)
+    def save_isometric(img, fname, drange, grid_size):
+        gw, gh = grid_size
+        fig, axes = plt.subplots(gh, gw, figsize=(gw * 3, gh * 3), subplot_kw={'projection': '3d'})
+        
+        if gw == 1 and gh == 1:
+            axes = np.array([[axes]])
+        elif gw == 1 or gh == 1:
+            axes = np.array([axes]).T if gh > 1 else np.array([axes])
+        
+        for i, ax in enumerate(axes.flatten()):
+            if i >= len(img):
+                ax.axis('off')
+                continue
+            
+            obj = img[i].cpu().numpy() if isinstance(img[i], torch.Tensor) else img[i]
+            obj = obj.squeeze(0)
+            voxels = obj > 0
+            x, y, z = np.where(voxels)
 
-    assert C in [1, 3]
-    if C == 1:
-        PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
-    if C == 3:
-        PIL.Image.fromarray(img, 'RGB').save(fname)
+            ax.scatter(x, y, z, c=obj[x, y, z], cmap='gray', marker='s')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_zticks([])
+        
+        plt.subplots_adjust(wspace=0, hspace=0)
+        plt.savefig(fname, bbox_inches='tight', pad_inches=0, dpi=150)
+        plt.close(fig)
+
+    def save_middle_slice(img, fname, drange, grid_size):
+        if fname.endswith('reals.png'):
+            img = img / np.max(img)
+        lo, hi = drange
+        middle_slice = img[:, :, :, :, img.shape[2] // 2]
+
+        middle_slice = np.asarray(middle_slice, dtype=np.float32)
+        middle_slice = (middle_slice - lo) * (255 / (hi - lo))
+        middle_slice = np.rint(middle_slice).clip(0, 255).astype(np.uint8)
+
+        gw, gh = grid_size
+        _N, C, H, W = middle_slice.shape
+        middle_slice = middle_slice.reshape(gh, gw, C, H, W)
+        middle_slice = middle_slice.transpose(0, 3, 1, 4, 2)
+        middle_slice = middle_slice.reshape(gh * H, gw * W, C)
+        assert C in [1, 3]
+        if C == 1:
+            PIL.Image.fromarray(middle_slice[:, :, 0], 'L').save(fname)
+        elif C == 3:
+            PIL.Image.fromarray(middle_slice, 'RGB').save(fname)
+    save_middle_slice(_img, _fname, _drange, _grid_size)
+
 
 #----------------------------------------------------------------------------
 
@@ -127,7 +164,7 @@ def training_loop(
     torch.backends.cudnn.benchmark = cudnn_benchmark    # Improves training speed.
     torch.backends.cuda.matmul.allow_tf32 = allow_tf32  # Allow PyTorch to internally use tf32 for matmul
     torch.backends.cudnn.allow_tf32 = allow_tf32        # Allow PyTorch to internally use tf32 for convolutions
-    conv2d_gradfix.enabled = True                       # Improves training speed.
+    conv3d_gradfix.enabled = True                       # Improves training speed.
     grid_sample_gradfix.enabled = True                  # Avoids errors with the augmentation pipe.
 
     # Load training set.
@@ -220,11 +257,12 @@ def training_loop(
     if rank == 0:
         print('Exporting sample images...')
         grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
-        save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+        save_image_grid(images, os.path.join(run_dir, 'reals.png'), _drange=[0,1], _grid_size=grid_size)
         grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
         grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
         images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-        save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+        # print(f"Fake images (first time): {np.max(images)=}, {np.min(images)=}")
+        save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), _drange=[-1,1], _grid_size=grid_size)
 
     # Initialize logs.
     if rank == 0:
@@ -257,7 +295,7 @@ def training_loop(
 
         # Fetch training data.
         with torch.autograd.profiler.record_function('data_fetch'):
-            phase_real_img, phase_real_c = next(training_set_iterator)
+            phase_real_img, phase_real_c = next(training_set_iterator)         
             phase_real_img = (phase_real_img.to(device).to(torch.float32) / 127.5 - 1).split(batch_gpu)
             phase_real_c = phase_real_c.to(device).split(batch_gpu)
             all_gen_z = torch.randn([len(phases) * batch_size, G.z_dim], device=device)
@@ -347,7 +385,7 @@ def training_loop(
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
             images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
+            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), _drange=[-1,1], _grid_size=grid_size)
 
         # Save network snapshot.
         snapshot_pkl = None

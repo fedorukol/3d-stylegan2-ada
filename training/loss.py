@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch_utils import training_stats
 from torch_utils import misc
-from torch_utils.ops import conv2d_gradfix
+from torch_utils.ops import conv3d_gradfix
 
 #----------------------------------------------------------------------------
 
@@ -61,7 +61,6 @@ class StyleGAN2Loss(Loss):
         do_Gpl   = (phase in ['Greg', 'Gboth']) and (self.pl_weight != 0)
         do_Dr1   = (phase in ['Dreg', 'Dboth']) and (self.r1_gamma != 0)
 
-        # Gmain: Maximize logits for generated images.
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl)) # May get synced by Gpl.
@@ -78,8 +77,8 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
                 gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size], sync=sync)
-                pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
-                with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
+                pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3] * gen_img.shape[4])
+                with torch.autograd.profiler.record_function('pl_grads'), conv3d_gradfix.no_weight_gradients():
                     pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
                 pl_lengths = pl_grads.square().sum(2).mean(1).sqrt()
                 pl_mean = self.pl_mean.lerp(pl_lengths.mean(), self.pl_decay)
@@ -89,9 +88,8 @@ class StyleGAN2Loss(Loss):
                 loss_Gpl = pl_penalty * self.pl_weight
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
-                (gen_img[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
+                (gen_img[:, 0, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
 
-        # Dmain: Minimize logits for generated images.
         loss_Dgen = 0
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
@@ -103,8 +101,6 @@ class StyleGAN2Loss(Loss):
             with torch.autograd.profiler.record_function('Dgen_backward'):
                 loss_Dgen.mean().mul(gain).backward()
 
-        # Dmain: Maximize logits for real images.
-        # Dr1: Apply R1 regularization.
         if do_Dmain or do_Dr1:
             name = 'Dreal_Dr1' if do_Dmain and do_Dr1 else 'Dreal' if do_Dmain else 'Dr1'
             with torch.autograd.profiler.record_function(name + '_forward'):
@@ -120,9 +116,9 @@ class StyleGAN2Loss(Loss):
 
                 loss_Dr1 = 0
                 if do_Dr1:
-                    with torch.autograd.profiler.record_function('r1_grads'), conv2d_gradfix.no_weight_gradients():
+                    with torch.autograd.profiler.record_function('r1_grads'), conv3d_gradfix.no_weight_gradients():
                         r1_grads = torch.autograd.grad(outputs=[real_logits.sum()], inputs=[real_img_tmp], create_graph=True, only_inputs=True)[0]
-                    r1_penalty = r1_grads.square().sum([1,2,3])
+                    r1_penalty = r1_grads.square().sum([1, 2, 3, 4])
                     loss_Dr1 = r1_penalty * (self.r1_gamma / 2)
                     training_stats.report('Loss/r1_penalty', r1_penalty)
                     training_stats.report('Loss/D/reg', loss_Dr1)

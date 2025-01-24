@@ -154,6 +154,7 @@ def setup_training_loop_kwargs(
     cfg_specs = {
         'auto':      dict(ref_gpus=-1, kimg=25000,  mb=-1, mbstd=-1, fmaps=-1,  lrate=-1,     gamma=-1,   ema=-1,  ramp=0.05, map=2), # Populated dynamically based on resolution and GPU count.
         'stylegan2': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=10,   ema=10,  ramp=None, map=8), # Uses mixed-precision, unlike the original StyleGAN2.
+        'stylegan2-gamma-06': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=0.6,   ema=10,  ramp=None, map=8),
         'paper256':  dict(ref_gpus=8,  kimg=25000,  mb=64, mbstd=8,  fmaps=0.5, lrate=0.0025, gamma=1,    ema=20,  ramp=None, map=8),
         'paper512':  dict(ref_gpus=8,  kimg=25000,  mb=64, mbstd=8,  fmaps=1,   lrate=0.0025, gamma=0.5,  ema=20,  ramp=None, map=8),
         'paper1024': dict(ref_gpus=8,  kimg=25000,  mb=32, mbstd=4,  fmaps=1,   lrate=0.002,  gamma=2,    ema=10,  ramp=None, map=8),
@@ -272,6 +273,7 @@ def setup_training_loop_kwargs(
         'blit':   dict(xflip=1, rotate90=1, xint=1),
         'geom':   dict(scale=1, rotate=1, aniso=1, xfrac=1),
         'color':  dict(brightness=1, contrast=1, lumaflip=1, hue=1, saturation=1),
+        'ready3d':  dict(xint=1, scale=1, rotate=1, aniso=1, xfrac=1, brightness=1, contrast=1, lumaflip=1, hue=1, saturation=1, noise=1, cutout=1, imgfilter=1),
         'filter': dict(imgfilter=1),
         'noise':  dict(noise=1),
         'cutout': dict(cutout=1),
@@ -413,7 +415,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--mirror', help='Enable dataset x-flips [default: false]', type=bool, metavar='BOOL')
 
 # Base config.
-@click.option('--cfg', help='Base config [default: auto]', type=click.Choice(['auto', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar']))
+@click.option('--cfg', help='Base config [default: auto]', type=click.Choice(['auto', 'stylegan2', 'paper256', 'paper512', 'paper1024', 'cifar', 'stylegan2-gamma-06']))
 @click.option('--gamma', help='Override R1 gamma', type=float)
 @click.option('--kimg', help='Override training duration', type=int, metavar='INT')
 @click.option('--batch', help='Override batch size', type=int, metavar='INT')
@@ -422,7 +424,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--aug', help='Augmentation mode [default: ada]', type=click.Choice(['noaug', 'ada', 'fixed']))
 @click.option('--p', help='Augmentation probability for --aug=fixed', type=float)
 @click.option('--target', help='ADA target value for --aug=ada', type=float)
-@click.option('--augpipe', help='Augmentation pipeline [default: bgc]', type=click.Choice(['blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc', 'bgcf', 'bgcfn', 'bgcfnc']))
+@click.option('--augpipe', help='Augmentation pipeline [default: bgc]', type=click.Choice(['blit', 'geom', 'color', 'filter', 'noise', 'cutout', 'bg', 'bgc', 'bgcf', 'bgcfn', 'bgcfnc', 'ready3d']))
 
 # Transfer learning.
 @click.option('--resume', help='Resume training [default: noresume]', metavar='PKL')

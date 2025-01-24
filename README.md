@@ -1,3 +1,13 @@
+This repo is based on the original https://github.com/NVlabs/stylegan2-ada-pytorch. The authors of original StyleGAN2-ADA architecture are Tero Karras, Miika Aittala, Janne Hellsten, Samuli Laine, Jaakko Lehtinen, Timo Aila - https://arxiv.org/abs/2006.06676.
+
+## 3DStyleGAN2-ADA
+
+Oleksandr Fedoruk
+
+Konrad Klimaszewski
+
+Michał Kruk
+
 ## StyleGAN2-ADA &mdash; Official PyTorch implementation
 
 ![Teaser image](./docs/stylegan2-ada-teaser-1024x252.png)

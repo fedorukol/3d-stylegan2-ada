@@ -24,60 +24,77 @@ enabled = False  # Enable the custom op by setting this to true.
 
 #----------------------------------------------------------------------------
 
-def grid_sample(input, grid):
-    if _should_use_custom_op():
-        return _GridSample2dForward.apply(input, grid)
-    return torch.nn.functional.grid_sample(input=input, grid=grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+def grid_sample(image, optical):
+    N, C, D, H, W = image.shape
+    _, D_out, H_out, W_out, _ = optical.shape
 
-#----------------------------------------------------------------------------
+    ix = optical[..., 0]
+    iy = optical[..., 1]
+    iz = optical[..., 2]
 
-def _should_use_custom_op():
-    if not enabled:
-        return False
-    if any(torch.__version__.startswith(x) for x in ['1.7.', '1.8.', '1.9']):
-        return True
-    warnings.warn(f'grid_sample_gradfix not supported on PyTorch {torch.__version__}. Falling back to torch.nn.functional.grid_sample().')
-    return False
+    ix = ((ix + 1) / 2) * (W - 1)
+    iy = ((iy + 1) / 2) * (H - 1)
+    iz = ((iz + 1) / 2) * (D - 1)
 
-#----------------------------------------------------------------------------
+    with torch.no_grad():
+        ix_0 = torch.floor(ix)
+        iy_0 = torch.floor(iy)
+        iz_0 = torch.floor(iz)
 
-class _GridSample2dForward(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, input, grid):
-        assert input.ndim == 4
-        assert grid.ndim == 4
-        output = torch.nn.functional.grid_sample(input=input, grid=grid, mode='bilinear', padding_mode='zeros', align_corners=False)
-        ctx.save_for_backward(input, grid)
-        return output
+        ix_1 = ix_0 + 1
+        iy_1 = iy_0 + 1
+        iz_1 = iz_0 + 1
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        input, grid = ctx.saved_tensors
-        grad_input, grad_grid = _GridSample2dBackward.apply(grad_output, input, grid)
-        return grad_input, grad_grid
+    dx = ix - ix_0
+    dy = iy - iy_0
+    dz = iz - iz_0
 
-#----------------------------------------------------------------------------
+    w000 = (1 - dx) * (1 - dy) * (1 - dz)
+    w100 = dx        * (1 - dy) * (1 - dz)
+    w010 = (1 - dx) * dy        * (1 - dz)
+    w110 = dx        * dy        * (1 - dz)
+    w001 = (1 - dx) * (1 - dy) * dz
+    w101 = dx        * (1 - dy) * dz
+    w011 = (1 - dx) * dy        * dz
+    w111 = dx        * dy        * dz
 
-class _GridSample2dBackward(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, grad_output, input, grid):
-        op = torch._C._jit_get_operation('aten::grid_sampler_2d_backward')
-        grad_input, grad_grid = op(grad_output, input, grid, 0, 0, False)
-        ctx.save_for_backward(grid)
-        return grad_input, grad_grid
+    with torch.no_grad():
+        ix_0 = torch.clamp(ix_0, 0, W - 1)
+        ix_1 = torch.clamp(ix_1, 0, W - 1)
+        iy_0 = torch.clamp(iy_0, 0, H - 1)
+        iy_1 = torch.clamp(iy_1, 0, H - 1)
+        iz_0 = torch.clamp(iz_0, 0, D - 1)
+        iz_1 = torch.clamp(iz_1, 0, D - 1)
 
-    @staticmethod
-    def backward(ctx, grad2_grad_input, grad2_grad_grid):
-        _ = grad2_grad_grid # unused
-        grid, = ctx.saved_tensors
-        grad2_grad_output = None
-        grad2_input = None
-        grad2_grid = None
+    image_flat = image.view(N, C, D * H * W)
 
-        if ctx.needs_input_grad[0]:
-            grad2_grad_output = _GridSample2dForward.apply(grad2_grad_input, grid)
+    def gather_vals(ix_idx, iy_idx, iz_idx):
+        linear_idx = (iz_idx * H * W) + (iy_idx * W) + ix_idx
+        linear_idx = linear_idx.long()
+        idx_expanded = linear_idx.view(N, 1, D_out * H_out * W_out).expand(N, C, D_out * H_out * W_out)
+        val = torch.gather(image_flat, 2, idx_expanded)
+        return val.view(N, C, D_out, H_out, W_out)
 
-        assert not ctx.needs_input_grad[2]
-        return grad2_grad_output, grad2_input, grad2_grid
+    val000 = gather_vals(ix_0, iy_0, iz_0)
+    val100 = gather_vals(ix_1, iy_0, iz_0)
+    val010 = gather_vals(ix_0, iy_1, iz_0)
+    val110 = gather_vals(ix_1, iy_1, iz_0)
+    val001 = gather_vals(ix_0, iy_0, iz_1)
+    val101 = gather_vals(ix_1, iy_0, iz_1)
+    val011 = gather_vals(ix_0, iy_1, iz_1)
+    val111 = gather_vals(ix_1, iy_1, iz_1)
+
+    out_val = (
+        val000 * w000.unsqueeze(1) +
+        val100 * w100.unsqueeze(1) +
+        val010 * w010.unsqueeze(1) +
+        val110 * w110.unsqueeze(1) +
+        val001 * w001.unsqueeze(1) +
+        val101 * w101.unsqueeze(1) +
+        val011 * w011.unsqueeze(1) +
+        val111 * w111.unsqueeze(1)
+    )
+
+    return out_val
 
 #----------------------------------------------------------------------------

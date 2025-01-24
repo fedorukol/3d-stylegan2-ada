@@ -7,6 +7,7 @@
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
 import os
+import io
 import numpy as np
 import zipfile
 import PIL.Image
@@ -84,13 +85,14 @@ class Dataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         image = self._load_raw_image(self._raw_idx[idx])
-        assert isinstance(image, np.ndarray)
+        assert isinstance(image, torch.Tensor)
         assert list(image.shape) == self.image_shape
-        assert image.dtype == np.uint8
+        # assert image.dtype == np.uint8
         if self._xflip[idx]:
-            assert image.ndim == 3 # CHW
+            assert image.ndim == 4 # CDHW
             image = image[:, :, ::-1]
-        return image.copy(), self.get_label(idx)
+
+        return image.float().clone().detach(), self.get_label(idx)
 
     def get_label(self, idx):
         label = self._get_raw_labels()[self._raw_idx[idx]]
@@ -117,12 +119,12 @@ class Dataset(torch.utils.data.Dataset):
 
     @property
     def num_channels(self):
-        assert len(self.image_shape) == 3 # CHW
+        assert len(self.image_shape) == 4 # CHWD
         return self.image_shape[0]
 
     @property
     def resolution(self):
-        assert len(self.image_shape) == 3 # CHW
+        assert len(self.image_shape) == 4 # CHWD
         assert self.image_shape[1] == self.image_shape[2]
         return self.image_shape[1]
 
@@ -169,8 +171,7 @@ class ImageFolderDataset(Dataset):
         else:
             raise IOError('Path must point to a directory or zip')
 
-        PIL.Image.init()
-        self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in PIL.Image.EXTENSION)
+        self._image_fnames = sorted(fname for fname in self._all_fnames if self._file_ext(fname) in ['.pt', '.torch_tensor'])
         if len(self._image_fnames) == 0:
             raise IOError('No image files found in the specified path')
 
@@ -210,13 +211,13 @@ class ImageFolderDataset(Dataset):
     def _load_raw_image(self, raw_idx):
         fname = self._image_fnames[raw_idx]
         with self._open_file(fname) as f:
-            if pyspng is not None and self._file_ext(fname) == '.png':
-                image = pyspng.load(f.read())
-            else:
-                image = np.array(PIL.Image.open(f))
-        if image.ndim == 2:
-            image = image[:, :, np.newaxis] # HW => HWC
-        image = image.transpose(2, 0, 1) # HWC => CHW
+            tensor_bytes = f.read()
+            tensor_stream = io.BytesIO(tensor_bytes)
+            image = torch.load(tensor_stream)
+
+        if image.ndimension() == 3:  # Equivalent to checking ndim == 3 in NumPy
+            image = image.unsqueeze(-1)  # Add channel dimension
+        image = image.permute(3, 2, 0, 1)  # Correct permutation to get CWHD 3102  3201
         return image
 
     def _load_raw_labels(self):

@@ -139,7 +139,7 @@ def convert_tf_generator(tf_G):
             num_fp16_res        = kwarg('num_fp16_res',         0),
             conv_clamp          = kwarg('conv_clamp',           None),
             architecture        = kwarg('architecture',         'skip'),
-            resample_filter     = kwarg('resample_kernel',      [1,3,3,1]),
+            resample_filter     = kwarg('resample_kernel',      [1,3,3,3,1]),
             use_noise           = kwarg('use_noise',            True),
             activation          = kwarg('nonlinearity',         'lrelu'),
         ),
@@ -228,7 +228,7 @@ def convert_tf_discriminator(tf_D):
         cmap_dim                = kwarg('mapping_fmaps',        None),
         block_kwargs = dnnlib.EasyDict(
             activation          = kwarg('nonlinearity',         'lrelu'),
-            resample_filter     = kwarg('resample_kernel',      [1,3,3,1]),
+            resample_filter     = kwarg('resample_kernel',      [1,3,3,3,1]),
             freeze_layers       = kwarg('freeze_layers',        0),
         ),
         mapping_kwargs = dnnlib.EasyDict(

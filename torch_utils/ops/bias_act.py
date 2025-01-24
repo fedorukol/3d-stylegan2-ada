@@ -39,16 +39,7 @@ _plugin = None
 _null_tensor = torch.empty([0])
 
 def _init():
-    global _inited, _plugin
-    if not _inited:
-        _inited = True
-        sources = ['bias_act.cpp', 'bias_act.cu']
-        sources = [os.path.join(os.path.dirname(__file__), s) for s in sources]
-        try:
-            _plugin = custom_ops.get_plugin('bias_act_plugin', sources=sources, extra_cuda_cflags=['--use_fast_math'])
-        except:
-            warnings.warn('Failed to build CUDA kernels for bias_act. Falling back to slow reference implementation. Details:\n\n' + traceback.format_exc())
-    return _plugin is not None
+    return False
 
 #----------------------------------------------------------------------------
 
@@ -145,7 +136,7 @@ def _bias_act_cuda(dim=1, act='linear', alpha=None, gain=None, clamp=None):
     class BiasActCuda(torch.autograd.Function):
         @staticmethod
         def forward(ctx, x, b): # pylint: disable=arguments-differ
-            ctx.memory_format = torch.channels_last if x.ndim > 2 and x.stride()[1] == 1 else torch.contiguous_format
+            ctx.memory_format = torch.contiguous_format
             x = x.contiguous(memory_format=ctx.memory_format)
             b = b.contiguous() if b is not None else _null_tensor
             y = x
@@ -178,7 +169,7 @@ def _bias_act_cuda(dim=1, act='linear', alpha=None, gain=None, clamp=None):
     class BiasActCudaGrad(torch.autograd.Function):
         @staticmethod
         def forward(ctx, dy, x, b, y): # pylint: disable=arguments-differ
-            ctx.memory_format = torch.channels_last if dy.ndim > 2 and dy.stride()[1] == 1 else torch.contiguous_format
+            ctx.memory_format = torch.contiguous_format
             dx = _plugin.bias_act(dy, b, x, y, _null_tensor, 1, dim, spec.cuda_idx, alpha, gain, clamp)
             ctx.save_for_backward(
                 dy if spec.has_2nd_grad else _null_tensor,
