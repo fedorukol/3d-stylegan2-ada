@@ -2,11 +2,13 @@ This repo is based on the original https://github.com/NVlabs/stylegan2-ada-pytor
 
 ## 3DStyleGAN2-ADA
 
+
 Oleksandr Fedoruk
-
 Konrad Klimaszewski
-
 Michał Kruk
+
+Institute of Information Technology, Warsaw University of Life Sciences, Warsaw, Poland;
+Department of Complex Systems, National Centre for Nuclear Research, Otwock, Poland;
 
 ## StyleGAN2-ADA &mdash; Official PyTorch implementation
 
